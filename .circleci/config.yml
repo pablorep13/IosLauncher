@@ -11,141 +11,120 @@ jobs:
       - run:
           name: Установка Ninja, CMake и обновление кода
           command: |
-            set -e
-            sudo apt-get update && sudo apt-get install -y ninja-build cmake
+            echo "========== STEP STARTED =========="
+            
+            sudo apt-get update
+            sudo apt-get install -y ninja-build cmake
+            
+            echo "========== APT FINISHED =========="
+            echo "========== STARTING PYTHON INJECTION =========="
 
-            python3 << 'PYTHON_SCRIPT'
-            import glob
-            import os
-            import re
-            import sys
+            python3 -c '
+import glob, os, re, sys
 
-            print("=" * 60)
-            print("=== STARTING INJECTION ===")
-            print("=" * 60)
+print("=" * 60)
+print("=== PYTHON SCRIPT STARTED ===")
+print("=" * 60)
 
-            # 1. Ищем MainActivity.kt
-            candidates = []
-            candidates += glob.glob("**/MainActivity.kt", recursive=True)
-            candidates += glob.glob("**/MainActivity.java", recursive=True)
-            candidates += glob.glob("app/src/main/java/**/*.kt", recursive=True)
+# Ищем MainActivity
+candidates = glob.glob("**/MainActivity.kt", recursive=True)
+candidates += glob.glob("**/MainActivity.java", recursive=True)
+candidates += glob.glob("**/*Activity.kt", recursive=True)
 
-            print(f"Found candidates: {candidates}")
+print("Candidates:")
+for c in candidates:
+    print("  ->", c)
 
-            main_file = None
-            for f in candidates:
-                if "MainActivity" in f and f.endswith((".kt", ".java")):
-                    main_file = f
-                    break
+main_file = None
+for f in candidates:
+    if "MainActivity" in os.path.basename(f):
+        main_file = f
+        break
+if not main_file and candidates:
+    main_file = candidates[0]
 
-            if not main_file:
-                # Последняя попытка — любой Activity
-                for f in glob.glob("**/*Activity.kt", recursive=True):
-                    main_file = f
-                    print(f"Fallback to: {main_file}")
-                    break
+if not main_file:
+    print("ERROR: No MainActivity found!")
+    for f in glob.glob("**/*.kt", recursive=True):
+        print("  ", f)
+    sys.exit(1)
 
-            if not main_file:
-                print("ERROR: MainActivity not found!")
-                print("Listing all kotlin files:")
-                for f in glob.glob("**/*.kt", recursive=True):
-                    print("  ", f)
-                sys.exit(1)
+print("=== USING:", main_file, "===")
 
-            print(f"=== FOUND MainActivity: {main_file} ===")
+pkg_line = "package com.example.ioslauncher"
+try:
+    with open(main_file, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip().startswith("package "):
+                pkg_line = line.strip()
+                break
+except Exception as e:
+    print("Package read error:", e)
 
-            # Читаем package
-            pkg_line = "package com.example.ioslauncher"
-            try:
-                with open(main_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip().startswith("package "):
-                            pkg_line = line.strip()
-                            break
-            except Exception as e:
-                print(f"Warning reading package: {e}")
+print("Package:", pkg_line)
 
-            print(f"Package line: {pkg_line}")
+# === Manifest ===
+manifests = [m for m in glob.glob("**/AndroidManifest.xml", recursive=True) if "build/" not in m and "intermediates" not in m]
+print("Manifests:", manifests)
 
-            # 2. Обновляем AndroidManifest.xml
-            manifests = glob.glob("**/AndroidManifest.xml", recursive=True)
-            print(f"Manifests found: {manifests}")
+for mf in manifests:
+    print("Processing", mf)
+    with open(mf, "r", encoding="utf-8") as f:
+        content = f.read()
+    original = content
 
-            for mf in manifests:
-                if "build/" in mf or "intermediates" in mf:
-                    continue
-                print(f"Processing manifest: {mf}")
-                with open(mf, "r", encoding="utf-8") as f:
-                    content = f.read()
+    content = re.sub(r"<uses-permission[^>]*QUERY_ALL_PACKAGES[^/]*/>\s*", "", content)
 
-                original = content
+    if "REQUEST_DELETE_PACKAGES" not in content:
+        perms = """    <uses-permission android:name=\"android.permission.REQUEST_DELETE_PACKAGES\" />
+    <uses-permission android:name=\"android.permission.VIBRATE\" />
+    <uses-permission android:name=\"android.permission.SET_WALLPAPER\" />
+"""
+        content = content.replace("<application", perms + "\n    <application", 1)
 
-                # Удаляем QUERY_ALL_PACKAGES
-                content = re.sub(
-                    r'<uses-permission[^>]*QUERY_ALL_PACKAGES[^/]*/>\s*',
-                    '',
-                    content
-                )
-
-                # Добавляем permissions если их нет
-                if "REQUEST_DELETE_PACKAGES" not in content:
-                    perms = '''    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
-    <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.SET_WALLPAPER" />
-'''
-                    content = content.replace("<application", perms + "\n    <application", 1)
-
-                # Добавляем <queries>
-                if "<queries>" not in content:
-                    queries = '''
+    if "<queries>" not in content:
+        queries = """
     <queries>
         <intent>
-            <action android:name="android.intent.action.MAIN" />
-            <category android:name="android.intent.category.LAUNCHER" />
+            <action android:name=\"android.intent.action.MAIN\" />
+            <category android:name=\"android.intent.category.LAUNCHER\" />
         </intent>
     </queries>
-'''
-                    content = content.replace("<application", queries + "\n    <application", 1)
+"""
+        content = content.replace("<application", queries + "\n    <application", 1)
 
-                # Добавляем xmlns:tools
-                if 'xmlns:tools=' not in content:
-                    content = content.replace(
-                        'xmlns:android="http://schemas.android.com/apk/res/android"',
-                        'xmlns:android="http://schemas.android.com/apk/res/android"\n    xmlns:tools="http://schemas.android.com/tools"'
-                    )
+    if "xmlns:tools=" not in content:
+        content = content.replace(
+            "xmlns:android=\"http://schemas.android.com/apk/res/android\"",
+            "xmlns:android=\"http://schemas.android.com/apk/res/android\"\n    xmlns:tools=\"http://schemas.android.com/tools\""
+        )
 
-                # Делаем Activity HOME
-                # Более простой и надёжный способ
-                if 'android.intent.category.HOME' not in content:
-                    # Ищем закрывающий тег activity и вставляем intent-filter перед ним
-                    home_filter = '''
+    if "android.intent.category.HOME" not in content:
+        home_filter = """
             <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.HOME" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <action android:name=\"android.intent.action.MAIN\" />
+                <category android:name=\"android.intent.category.HOME\" />
+                <category android:name=\"android.intent.category.DEFAULT\" />
+                <category android:name=\"android.intent.category.LAUNCHER\" />
             </intent-filter>
-'''
-                    # Пробуем вставить перед </activity>
-                    content = content.replace("</activity>", home_filter + "        </activity>", 1)
+"""
+        content = content.replace("</activity>", home_filter + "        </activity>", 1)
 
-                # Добавляем важные атрибуты
-                content = re.sub(
-                    r'(<activity[^>]*android:name="[^"]*MainActivity"[^>]*)(>)',
-                    r'\1 android:exported="true" android:launchMode="singleTask" android:stateNotNeeded="true" android:clearTaskOnLaunch="true"\2',
-                    content,
-                    count=1
-                )
+    content = re.sub(
+        r"(<activity[^>]*android:name=\"[^\"]*MainActivity\"[^>]*)(>)",
+        r"\1 android:exported=\"true\" android:launchMode=\"singleTask\" android:stateNotNeeded=\"true\" android:clearTaskOnLaunch=\"true\"\2",
+        content, count=1
+    )
 
-                if content != original:
-                    with open(mf, "w", encoding="utf-8") as f:
-                        f.write(content)
-                    print(f"=== UPDATED MANIFEST: {mf} ===")
-                else:
-                    print(f"Manifest already ok or no changes: {mf}")
+    if content != original:
+        with open(mf, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("=== MANIFEST UPDATED:", mf, "===")
+    else:
+        print("Manifest already OK:", mf)
 
-            # 3. Пишем новый MainActivity
-            kotlin_code = r'''
+# === Kotlin code ===
+kotlin_code = r"""
 import android.animation.*
 import android.app.Activity
 import android.app.AlertDialog
@@ -204,11 +183,7 @@ class MainActivity : Activity() {
 
         override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
             when (ev.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    startX = ev.x
-                    startY = ev.y
-                    isSwiping = false
-                }
+                MotionEvent.ACTION_DOWN -> { startX = ev.x; startY = ev.y; isSwiping = false }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = ev.x - startX
                     val dy = ev.y - startY
@@ -222,18 +197,16 @@ class MainActivity : Activity() {
         }
 
         override fun onTouchEvent(ev: MotionEvent): Boolean {
-            when (ev.actionMasked) {
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isSwiping) {
-                        val dx = ev.x - startX
-                        if (abs(dx) > dp(50)) {
-                            performHaptic(30)
-                            if (dx < 0) onSwipeLeft?.invoke() else onSwipeRight?.invoke()
-                        }
+            if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+                if (isSwiping) {
+                    val dx = ev.x - startX
+                    if (abs(dx) > dp(50)) {
+                        performHaptic(30)
+                        if (dx < 0) onSwipeLeft?.invoke() else onSwipeRight?.invoke()
                     }
-                    isSwiping = false
-                    return true
                 }
+                isSwiping = false
+                return true
             }
             return true
         }
@@ -243,7 +216,6 @@ class MainActivity : Activity() {
     private val allApps = mutableListOf<AppInfo>()
     private val homeItems = mutableListOf<HomeItem>()
     private val activeWidgets = mutableListOf<WidgetType>()
-
     private var isHorizontalMode = true
     private var currentPage = 0
     private val columns = 4
@@ -271,12 +243,9 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.setDecorFitsSystemWindows(false)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-        }
-
-        prefs = getSharedPreferences("ios_launcher_prefs_v2", Context.MODE_PRIVATE)
+        prefs = getSharedPreferences("ios_launcher_prefs_v3", Context.MODE_PRIVATE)
         isHorizontalMode = prefs.getBoolean("horizontal_mode", true)
 
         loadActiveWidgets()
@@ -288,9 +257,9 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         clockHandler.post(clockRunnable)
-        val oldCount = allApps.size
+        val old = allApps.size
         loadInstalledApps()
-        if (allApps.size != oldCount) {
+        if (allApps.size != old) {
             buildHomeItemsFromState()
             renderAppsArea()
             renderDock()
@@ -330,8 +299,7 @@ class MainActivity : Activity() {
         allApps.clear()
         val pm = packageManager
         val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
-        val list = pm.queryIntentActivities(intent, 0)
-        for (ri in list) {
+        for (ri in pm.queryIntentActivities(intent, 0)) {
             val pkg = ri.activityInfo.packageName
             if (pkg == packageName) continue
             try {
@@ -344,9 +312,7 @@ class MainActivity : Activity() {
     private fun loadActiveWidgets() {
         activeWidgets.clear()
         val saved = prefs.getString("active_widgets", "CLOCK") ?: "CLOCK"
-        if (saved.isNotEmpty()) {
-            saved.split(",").forEach { runCatching { activeWidgets.add(WidgetType.valueOf(it.trim())) } }
-        }
+        saved.split(",").forEach { runCatching { activeWidgets.add(WidgetType.valueOf(it.trim())) } }
         if (activeWidgets.isEmpty()) activeWidgets.add(WidgetType.CLOCK)
     }
 
@@ -357,7 +323,6 @@ class MainActivity : Activity() {
     private fun buildHomeItemsFromState() {
         homeItems.clear()
         val map = allApps.associateBy { it.packageName }.toMutableMap()
-
         val foldersJson = prefs.getString("folders_json", "[]") ?: "[]"
         runCatching {
             val arr = JSONArray(foldersJson)
@@ -366,17 +331,12 @@ class MainActivity : Activity() {
                 val name = obj.getString("name")
                 val pkgs = obj.getJSONArray("apps")
                 val list = mutableListOf<AppInfo>()
-                for (j in 0 until pkgs.length()) {
-                    map.remove(pkgs.getString(j))?.let { list.add(it) }
-                }
+                for (j in 0 until pkgs.length()) map.remove(pkgs.getString(j))?.let { list.add(it) }
                 if (list.isNotEmpty()) homeItems.add(HomeItem.Folder(name, list))
             }
         }
-
         val order = prefs.getString("apps_order", "") ?: ""
-        if (order.isNotEmpty()) {
-            order.split(",").forEach { pkg -> map.remove(pkg)?.let { homeItems.add(HomeItem.App(it)) } }
-        }
+        if (order.isNotEmpty()) order.split(",").forEach { pkg -> map.remove(pkg)?.let { homeItems.add(HomeItem.App(it)) } }
         map.values.forEach { homeItems.add(HomeItem.App(it)) }
     }
 
@@ -385,62 +345,36 @@ class MainActivity : Activity() {
         val orderList = mutableListOf<String>()
         for (item in homeItems) {
             when (item) {
-                is HomeItem.Folder -> {
-                    if (item.apps.isNotEmpty()) {
-                        val obj = JSONObject()
-                        obj.put("name", item.name)
-                        val pkgs = JSONArray()
-                        item.apps.forEach { pkgs.put(it.packageName) }
-                        obj.put("apps", pkgs)
-                        foldersArr.put(obj)
-                    }
+                is HomeItem.Folder -> if (item.apps.isNotEmpty()) {
+                    val obj = JSONObject()
+                    obj.put("name", item.name)
+                    val pkgs = JSONArray()
+                    item.apps.forEach { pkgs.put(it.packageName) }
+                    obj.put("apps", pkgs)
+                    foldersArr.put(obj)
                 }
                 is HomeItem.App -> orderList.add(item.appInfo.packageName)
             }
         }
-        prefs.edit()
-            .putString("folders_json", foldersArr.toString())
-            .putString("apps_order", orderList.joinToString(","))
-            .apply()
+        prefs.edit().putString("folders_json", foldersArr.toString()).putString("apps_order", orderList.joinToString(",")).apply()
     }
 
     private fun setupUI() {
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.TRANSPARENT)
-            setOnLongClickListener {
-                if (!isEditMode) enterEditMode()
-                true
-            }
+            setOnLongClickListener { if (!isEditMode) enterEditMode(); true }
         }
-
         mainColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(48), dp(12), dp(20))
         }
-
         widgetsContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        mainColumn.addView(widgetsContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
+        mainColumn.addView(widgetsContainer, LinearLayout.LayoutParams(-1, -2))
         appsContainer = FrameLayout(this)
-        mainColumn.addView(appsContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-            topMargin = dp(6)
-            bottomMargin = dp(2)
-        })
-
-        pageIndicatorLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        mainColumn.addView(pageIndicatorLayout, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(20)))
-
-        val searchBar = createSearchBar()
-        mainColumn.addView(searchBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
-            topMargin = dp(4)
-            bottomMargin = dp(10)
-            leftMargin = dp(6)
-            rightMargin = dp(6)
-        })
-
+        mainColumn.addView(appsContainer, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(6); bottomMargin = dp(2) })
+        pageIndicatorLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        mainColumn.addView(pageIndicatorLayout, LinearLayout.LayoutParams(-1, dp(20)))
+        mainColumn.addView(createSearchBar(), LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(4); bottomMargin = dp(10); leftMargin = dp(6); rightMargin = dp(6) })
         dockLayout = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -448,11 +382,9 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
             elevation = 12f
         }
-        mainColumn.addView(dockLayout, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(92)))
-
-        rootLayout.addView(mainColumn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        mainColumn.addView(dockLayout, LinearLayout.LayoutParams(-1, dp(92)))
+        rootLayout.addView(mainColumn, FrameLayout.LayoutParams(-1, -1))
         setContentView(rootLayout)
-
         updateWidgetsUI()
         renderAppsArea()
         renderDock()
@@ -461,19 +393,10 @@ class MainActivity : Activity() {
     private fun createLiquidGlassDrawable(radiusDp: Float): Drawable {
         val r = dp(radiusDp.toInt()).toFloat()
         val base = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(
-            Color.argb(110, 255, 255, 255),
-            Color.argb(55, 255, 255, 255),
-            Color.argb(90, 240, 245, 255)
-        )).apply {
-            cornerRadius = r
-            setStroke(dp(1), Color.argb(180, 255, 255, 255))
-        }
-        val highlight = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(
-            Color.argb(40, 255, 255, 255), Color.TRANSPARENT
-        )).apply { cornerRadius = r }
-        return LayerDrawable(arrayOf(base, highlight)).apply {
-            setLayerInset(1, 0, 0, 0, dp(8))
-        }
+            Color.argb(110, 255, 255, 255), Color.argb(55, 255, 255, 255), Color.argb(90, 240, 245, 255)
+        )).apply { cornerRadius = r; setStroke(dp(1), Color.argb(180, 255, 255, 255)) }
+        val highlight = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.argb(40, 255, 255, 255), Color.TRANSPARENT)).apply { cornerRadius = r }
+        return LayerDrawable(arrayOf(base, highlight)).apply { setLayerInset(1, 0, 0, 0, dp(8)) }
     }
 
     private fun updateWidgetsUI() {
@@ -485,9 +408,8 @@ class MainActivity : Activity() {
                 WidgetType.NOTE -> buildNoteWidget()
             }
             v.setOnLongClickListener { showWidgetMenu(index); true }
-            v.alpha = 0f
-            v.translationY = 20f
-            widgetsContainer.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
+            v.alpha = 0f; v.translationY = 20f
+            widgetsContainer.addView(v, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
             v.animate().alpha(1f).translationY(0f).setDuration(280).setInterpolator(DecelerateInterpolator()).start()
         }
     }
@@ -498,40 +420,32 @@ class MainActivity : Activity() {
             background = createLiquidGlassDrawable(26f)
             setPadding(dp(24), dp(16), dp(24), dp(18))
             elevation = 8f
-            setOnClickListener { animatePress(this) {
-                runCatching { startActivity(Intent(AlarmClock.ACTION_SHOW_ALARMS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) }
-            }}
+            setOnClickListener { animatePress(this) { runCatching { startActivity(Intent(AlarmClock.ACTION_SHOW_ALARMS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) } } }
         }
         val now = Date()
         box.addView(TextView(this).apply {
             text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(now)
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
+            setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
             typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
             setShadowLayer(10f, 0f, 2f, Color.argb(100, 0, 0, 0))
         })
         box.addView(TextView(this).apply {
             text = SimpleDateFormat("EEEE, d MMMM", Locale("ru")).format(now)
-            setTextColor(Color.argb(240, 255, 255, 255))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(Color.argb(240, 255, 255, 255)); setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             setShadowLayer(6f, 0f, 1f, Color.argb(80, 0, 0, 0))
         })
         return box
     }
 
     private fun buildBatteryWidget(): View {
-        val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val level = (getSystemService(Context.BATTERY_SERVICE) as BatteryManager).getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         return LinearLayout(this).apply {
             background = createLiquidGlassDrawable(22f)
-            setPadding(dp(20), dp(14), dp(20), dp(14))
-            elevation = 6f
+            setPadding(dp(20), dp(14), dp(20), dp(14)); elevation = 6f
             setOnClickListener { animatePress(this) { runCatching { startActivity(Intent(Intent.ACTION_POWER_USAGE_SUMMARY)) } } }
             addView(TextView(this@MainActivity).apply {
                 text = "🔋  Заряд батареи: $level%"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f); typeface = Typeface.DEFAULT_BOLD
             })
         }
     }
@@ -540,22 +454,18 @@ class MainActivity : Activity() {
         val note = prefs.getString("widget_note", "Нажмите для редактирования заметки")
         return LinearLayout(this).apply {
             background = createLiquidGlassDrawable(22f)
-            setPadding(dp(20), dp(14), dp(20), dp(14))
-            elevation = 6f
+            setPadding(dp(20), dp(14), dp(20), dp(14)); elevation = 6f
             setOnClickListener { animatePress(this) { editNoteDialog() } }
             addView(TextView(this@MainActivity).apply {
-                text = "📌  $note"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                text = "📌  $note"; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             })
         }
     }
 
     private fun showWidgetMenu(index: Int) {
-        val items = arrayOf("➕ Добавить виджет", "⬆️ Переместить выше", "⬇️ Переместить ниже", "🗑️ Удалить этот виджет")
+        val items = arrayOf("➕ Добавить виджет", "⬆️ Выше", "⬇️ Ниже", "🗑️ Удалить")
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Виджет")
-            .setItems(items) { _, w ->
+            .setTitle("Виджет").setItems(items) { _, w ->
                 when (w) {
                     0 -> showAddWidgetDialog()
                     1 -> if (index > 0) { Collections.swap(activeWidgets, index, index - 1); saveActiveWidgets(); updateWidgetsUI() }
@@ -566,81 +476,47 @@ class MainActivity : Activity() {
     }
 
     private fun showAddWidgetDialog() {
-        val names = arrayOf("🕒 Часы (Liquid Glass)", "🔋 Заряд батареи", "📌 Заметка")
+        val names = arrayOf("🕒 Часы", "🔋 Батарея", "📌 Заметка")
         val types = arrayOf(WidgetType.CLOCK, WidgetType.BATTERY, WidgetType.NOTE)
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Добавить виджет")
-            .setItems(names) { _, w ->
+            .setTitle("Добавить виджет").setItems(names) { _, w ->
                 if (!activeWidgets.contains(types[w])) {
-                    activeWidgets.add(types[w])
-                    saveActiveWidgets()
-                    updateWidgetsUI()
+                    activeWidgets.add(types[w]); saveActiveWidgets(); updateWidgetsUI()
                 }
             }.show()
     }
 
     private fun editNoteDialog() {
-        val input = EditText(this).apply {
-            setText(prefs.getString("widget_note", ""))
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-        }
+        val input = EditText(this).apply { setText(prefs.getString("widget_note", "")); setTextColor(Color.WHITE) }
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Текст заметки")
-            .setView(input)
-            .setPositiveButton("Сохранить") { _, _ ->
-                prefs.edit().putString("widget_note", input.text.toString()).apply()
-                updateWidgetsUI()
-            }
-            .setNegativeButton("Отмена", null)
-            .show()
+            .setTitle("Заметка").setView(input)
+            .setPositiveButton("Сохранить") { _, _ -> prefs.edit().putString("widget_note", input.text.toString()).apply(); updateWidgetsUI() }
+            .setNegativeButton("Отмена", null).show()
     }
 
     private fun renderAppsArea() {
         appsContainer.removeAllViews()
         pageIndicatorLayout.removeAllViews()
-
         if (isHorizontalMode) {
             pageIndicatorLayout.visibility = View.VISIBLE
             val totalPages = maxOf(1, ceil(homeItems.size.toDouble() / itemsPerPage).toInt())
             if (currentPage >= totalPages) currentPage = totalPages - 1
-
             val start = currentPage * itemsPerPage
             val end = min(start + itemsPerPage, homeItems.size)
             val slice = if (start < homeItems.size) homeItems.subList(start, end) else emptyList()
-
-            val swipeLayout = SwipePagerLayout(this).apply {
-                onSwipeLeft = {
-                    if (currentPage < totalPages - 1) {
-                        currentPage++
-                        animatePageChange(true)
-                    }
-                }
-                onSwipeRight = {
-                    if (currentPage > 0) {
-                        currentPage--
-                        animatePageChange(false)
-                    }
-                }
+            val swipe = SwipePagerLayout(this).apply {
+                onSwipeLeft = { if (currentPage < totalPages - 1) { currentPage++; animatePageChange(true) } }
+                onSwipeRight = { if (currentPage > 0) { currentPage--; animatePageChange(false) } }
             }
-
-            val grid = buildGridForItems(slice, start)
-            swipeLayout.addView(grid, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            appsContainer.addView(swipeLayout)
-
+            swipe.addView(buildGridForItems(slice, start), FrameLayout.LayoutParams(-1, -1))
+            appsContainer.addView(swipe)
             for (i in 0 until totalPages) {
-                val isActive = i == currentPage
+                val active = i == currentPage
                 val dot = View(this).apply {
-                    val sz = if (isActive) dp(8) else dp(6)
+                    val sz = if (active) dp(8) else dp(6)
                     layoutParams = LinearLayout.LayoutParams(sz, sz).apply { leftMargin = dp(4); rightMargin = dp(4) }
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(if (isActive) Color.WHITE else Color.argb(100, 255, 255, 255))
-                    }
-                    if (isActive) {
-                        scaleX = 0.6f; scaleY = 0.6f
-                        animate().scaleX(1f).scaleY(1f).setDuration(200).setInterpolator(OvershootInterpolator()).start()
-                    }
+                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (active) Color.WHITE else Color.argb(100, 255, 255, 255)) }
+                    if (active) { scaleX = 0.6f; scaleY = 0.6f; animate().scaleX(1f).scaleY(1f).setDuration(200).setInterpolator(OvershootInterpolator()).start() }
                 }
                 pageIndicatorLayout.addView(dot)
             }
@@ -648,18 +524,18 @@ class MainActivity : Activity() {
             pageIndicatorLayout.visibility = View.GONE
             val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
             scroll.addView(buildGridForItems(homeItems, 0))
-            appsContainer.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            appsContainer.addView(scroll, FrameLayout.LayoutParams(-1, -1))
         }
     }
 
     private fun animatePageChange(toLeft: Boolean) {
-        val current = appsContainer.getChildAt(0)
-        current?.animate()?.translationX(if (toLeft) -dp(80).toFloat() else dp(80).toFloat())?.alpha(0.3f)?.setDuration(160)?.withEndAction {
+        val cur = appsContainer.getChildAt(0)
+        cur?.animate()?.translationX(if (toLeft) -dp(80).toFloat() else dp(80).toFloat())?.alpha(0.3f)?.setDuration(160)?.withEndAction {
             renderAppsArea()
-            val newView = appsContainer.getChildAt(0)
-            newView?.translationX = if (toLeft) dp(80).toFloat() else -dp(80).toFloat()
-            newView?.alpha = 0.3f
-            newView?.animate()?.translationX(0f)?.alpha(1f)?.setDuration(200)?.setInterpolator(DecelerateInterpolator())?.start()
+            val nv = appsContainer.getChildAt(0)
+            nv?.translationX = if (toLeft) dp(80).toFloat() else -dp(80).toFloat()
+            nv?.alpha = 0.3f
+            nv?.animate()?.translationX(0f)?.alpha(1f)?.setDuration(200)?.setInterpolator(DecelerateInterpolator())?.start()
         }?.start()
     }
 
@@ -668,18 +544,12 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             val rows = ceil(items.size.toDouble() / columns).toInt()
             for (r in 0 until rows) {
-                val row = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    weightSum = columns.toFloat()
-                }
+                val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; weightSum = columns.toFloat() }
                 for (c in 0 until columns) {
                     val idx = r * columns + c
                     if (idx < items.size) {
-                        row.addView(createHomeItemView(items[idx], offset + idx),
-                            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { topMargin = dp(6); bottomMargin = dp(6) })
-                    } else {
-                        row.addView(Space(this@MainActivity), LinearLayout.LayoutParams(0, dp(10), 1f))
-                    }
+                        row.addView(createHomeItemView(items[idx], offset + idx), LinearLayout.LayoutParams(0, -2, 1f).apply { topMargin = dp(6); bottomMargin = dp(6) })
+                    } else row.addView(Space(this@MainActivity), LinearLayout.LayoutParams(0, dp(10), 1f))
                 }
                 addView(row)
             }
@@ -687,82 +557,38 @@ class MainActivity : Activity() {
     }
 
     private fun createHomeItemView(item: HomeItem, globalIdx: Int): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-        }
-
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(4), dp(4), dp(4), dp(4)) }
         when (item) {
             is HomeItem.App -> {
-                val iv = ImageView(this).apply {
-                    setImageDrawable(item.appInfo.icon)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                    elevation = 4f
-                }
+                val iv = ImageView(this).apply { setImageDrawable(item.appInfo.icon); scaleType = ImageView.ScaleType.FIT_CENTER; elevation = 4f }
                 val tv = TextView(this).apply {
-                    text = item.appInfo.label
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                    gravity = Gravity.CENTER
-                    setShadowLayer(6f, 0f, 1.5f, Color.BLACK)
+                    text = item.appInfo.label; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    maxLines = 1; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER; setShadowLayer(6f, 0f, 1.5f, Color.BLACK)
                 }
                 box.addView(iv, LinearLayout.LayoutParams(dp(58), dp(58)))
-                box.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(5) })
-
-                box.setOnClickListener {
-                    if (isEditMode) showAppPopup(box, item.appInfo, globalIdx)
-                    else animatePress(box) { launchApp(item.appInfo.packageName) }
-                }
-                box.setOnLongClickListener {
-                    performHaptic(40)
-                    if (!isEditMode) enterEditMode()
-                    showAppPopup(box, item.appInfo, globalIdx)
-                    true
-                }
+                box.addView(tv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
+                box.setOnClickListener { if (isEditMode) showAppPopup(box, item.appInfo, globalIdx) else animatePress(box) { launchApp(item.appInfo.packageName) } }
+                box.setOnLongClickListener { performHaptic(40); if (!isEditMode) enterEditMode(); showAppPopup(box, item.appInfo, globalIdx); true }
                 if (isEditMode) startJiggle(box)
             }
-
             is HomeItem.Folder -> {
                 val grid = GridLayout(this).apply {
-                    rowCount = 2; columnCount = 2
-                    background = createLiquidGlassDrawable(16f)
-                    setPadding(dp(7), dp(7), dp(7), dp(7))
-                    elevation = 4f
+                    rowCount = 2; columnCount = 2; background = createLiquidGlassDrawable(16f); setPadding(dp(7), dp(7), dp(7), dp(7)); elevation = 4f
                 }
                 item.apps.take(4).forEach { app ->
                     grid.addView(ImageView(this).apply {
                         setImageDrawable(app.icon)
-                        layoutParams = GridLayout.LayoutParams().apply {
-                            width = dp(20); height = dp(20)
-                            setMargins(dp(2), dp(2), dp(2), dp(2))
-                        }
+                        layoutParams = GridLayout.LayoutParams().apply { width = dp(20); height = dp(20); setMargins(dp(2), dp(2), dp(2), dp(2)) }
                     })
                 }
                 val tv = TextView(this).apply {
-                    text = item.name
-                    setTextColor(Color.WHITE)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                    gravity = Gravity.CENTER
-                    setShadowLayer(6f, 0f, 1.5f, Color.BLACK)
+                    text = item.name; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    maxLines = 1; ellipsize = TextUtils.TruncateAt.END; gravity = Gravity.CENTER; setShadowLayer(6f, 0f, 1.5f, Color.BLACK)
                 }
                 box.addView(grid, LinearLayout.LayoutParams(dp(58), dp(58)))
-                box.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(5) })
-
-                box.setOnClickListener {
-                    if (isEditMode) showFolderMenu(item, globalIdx)
-                    else animatePress(box) { openFolderDialog(item) }
-                }
-                box.setOnLongClickListener {
-                    performHaptic(40)
-                    if (!isEditMode) enterEditMode()
-                    showFolderMenu(item, globalIdx)
-                    true
-                }
+                box.addView(tv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
+                box.setOnClickListener { if (isEditMode) showFolderMenu(item, globalIdx) else animatePress(box) { openFolderDialog(item) } }
+                box.setOnLongClickListener { performHaptic(40); if (!isEditMode) enterEditMode(); showFolderMenu(item, globalIdx); true }
                 if (isEditMode) startJiggle(box)
             }
         }
@@ -771,10 +597,7 @@ class MainActivity : Activity() {
 
     private fun animatePress(view: View, action: () -> Unit) {
         view.animate().scaleX(0.86f).scaleY(0.86f).setDuration(90).setInterpolator(DecelerateInterpolator())
-            .withEndAction {
-                view.animate().scaleX(1f).scaleY(1f).setDuration(160).setInterpolator(OvershootInterpolator(2.5f))
-                    .withEndAction { action() }.start()
-            }.start()
+            .withEndAction { view.animate().scaleX(1f).scaleY(1f).setDuration(160).setInterpolator(OvershootInterpolator(2.5f)).withEndAction { action() }.start() }.start()
         performHaptic(15)
     }
 
@@ -782,187 +605,111 @@ class MainActivity : Activity() {
         if (isEditMode) return
         isEditMode = true
         performHaptic(50)
-        Toast.makeText(this, "Режим редактирования — Back или «Готово»", Toast.LENGTH_SHORT).show()
-        renderAppsArea()
-        renderDock()
+        Toast.makeText(this, "Режим редактирования (Back = выход)", Toast.LENGTH_SHORT).show()
+        renderAppsArea(); renderDock()
     }
 
     private fun exitEditMode() {
         if (!isEditMode) return
         isEditMode = false
-        renderAppsArea()
-        renderDock()
+        renderAppsArea(); renderDock()
     }
 
     private fun startJiggle(view: View) {
-        val anim = ObjectAnimator.ofFloat(view, "rotation", -2.2f, 2.2f).apply {
-            duration = 140
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-            interpolator = DecelerateInterpolator()
-        }
-        anim.start()
-        view.tag = anim
+        ObjectAnimator.ofFloat(view, "rotation", -2.2f, 2.2f).apply {
+            duration = 140; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = DecelerateInterpolator()
+        }.start()
     }
 
     private fun showAppPopup(anchor: View, app: AppInfo, index: Int) {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                cornerRadius = dp(18).toFloat()
-                setColor(Color.argb(240, 30, 30, 35))
-                setStroke(dp(1), Color.argb(120, 255, 255, 255))
-            }
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            elevation = 28f
+            background = GradientDrawable().apply { cornerRadius = dp(18).toFloat(); setColor(Color.argb(240, 30, 30, 35)); setStroke(dp(1), Color.argb(120, 255, 255, 255)) }
+            setPadding(dp(6), dp(6), dp(6), dp(6)); elevation = 28f
         }
         lateinit var popup: PopupWindow
-
         fun row(text: String, color: Int = Color.WHITE, action: () -> Unit) {
             layout.addView(TextView(this).apply {
-                this.text = text
-                setTextColor(color)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
-                setPadding(dp(18), dp(13), dp(18), dp(13))
-                setOnClickListener { popup.dismiss(); action() }
+                this.text = text; setTextColor(color); setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+                setPadding(dp(18), dp(13), dp(18), dp(13)); setOnClickListener { popup.dismiss(); action() }
             })
         }
-
         row("ℹ️  О приложении") { openAppSettings(app.packageName) }
-        row("🗑️  Удалить приложение", Color.rgb(255, 90, 85)) { uninstallApp(app.packageName) }
-        row("📁  В папку / Создать папку") { moveToFolderDialog(app, index) }
-        row("⬅️  Сдвинуть влево") {
-            if (index > 0) { Collections.swap(homeItems, index, index - 1); saveHomeState(); renderAppsArea() }
-        }
-        row("➡️  Сдвинуть вправо") {
-            if (index < homeItems.size - 1) { Collections.swap(homeItems, index, index + 1); saveHomeState(); renderAppsArea() }
-        }
+        row("🗑️  Удалить", Color.rgb(255, 90, 85)) { uninstallApp(app.packageName) }
+        row("📁  В папку") { moveToFolderDialog(app, index) }
+        row("⬅️  Влево") { if (index > 0) { Collections.swap(homeItems, index, index - 1); saveHomeState(); renderAppsArea() } }
+        row("➡️  Вправо") { if (index < homeItems.size - 1) { Collections.swap(homeItems, index, index + 1); saveHomeState(); renderAppsArea() } }
         if (isEditMode) row("✅  Готово") { exitEditMode() }
-
-        popup = PopupWindow(layout, dp(250), ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
-            elevation = 30f
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            showAsDropDown(anchor, 0, -dp(16))
+        popup = PopupWindow(layout, dp(250), -2, true).apply {
+            elevation = 30f; setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); showAsDropDown(anchor, 0, -dp(16))
         }
     }
 
     private fun moveToFolderDialog(app: AppInfo, index: Int) {
         val folders = homeItems.filterIsInstance<HomeItem.Folder>()
-        val opts = mutableListOf("➕ Создать новую папку")
+        val opts = mutableListOf("➕ Новая папка")
         folders.forEach { opts.add("📁 ${it.name}") }
-
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(app.label)
-            .setItems(opts.toTypedArray()) { _, w ->
+            .setTitle(app.label).setItems(opts.toTypedArray()) { _, w ->
                 if (w == 0) {
                     val input = EditText(this).apply { setText("Новая папка"); setTextColor(Color.WHITE) }
                     AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Название папки")
-                        .setView(input)
+                        .setTitle("Название").setView(input)
                         .setPositiveButton("Создать") { _, _ ->
-                            val name = input.text.toString().ifBlank { "Папка" }
-                            homeItems[index] = HomeItem.Folder(name, mutableListOf(app))
-                            saveHomeState()
-                            renderAppsArea()
-                        }
-                        .setNegativeButton("Отмена", null)
-                        .show()
+                            homeItems[index] = HomeItem.Folder(input.text.toString().ifBlank { "Папка" }, mutableListOf(app))
+                            saveHomeState(); renderAppsArea()
+                        }.setNegativeButton("Отмена", null).show()
                 } else {
-                    folders[w - 1].apps.add(app)
-                    homeItems.removeAt(index)
-                    saveHomeState()
-                    renderAppsArea()
+                    folders[w - 1].apps.add(app); homeItems.removeAt(index); saveHomeState(); renderAppsArea()
                 }
             }.show()
     }
 
     private fun openFolderDialog(folder: HomeItem.Folder) {
         val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(22), dp(22), dp(22))
-            background = createLiquidGlassDrawable(28f)
-            elevation = 20f
-            scaleX = 0.85f; scaleY = 0.85f; alpha = 0f
+            orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(22), dp(22), dp(22))
+            background = createLiquidGlassDrawable(28f); elevation = 20f; scaleX = 0.85f; scaleY = 0.85f; alpha = 0f
         }
         box.addView(TextView(this).apply {
-            text = folder.name
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(14))
+            text = folder.name; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(14))
         })
-
         val grid = GridLayout(this).apply { columnCount = 3 }
         lateinit var dialog: AlertDialog
-
         folder.apps.toList().forEachIndexed { idx, app ->
             val cell = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(dp(10), dp(10), dp(10), dp(10))
-                setOnClickListener {
-                    dialog.dismiss()
-                    animatePress(this) { launchApp(app.packageName) }
-                }
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(10), dp(10), dp(10), dp(10))
+                setOnClickListener { dialog.dismiss(); animatePress(this) { launchApp(app.packageName) } }
                 setOnLongClickListener {
-                    dialog.dismiss()
-                    folder.apps.removeAt(idx)
-                    homeItems.add(HomeItem.App(app))
+                    dialog.dismiss(); folder.apps.removeAt(idx); homeItems.add(HomeItem.App(app))
                     if (folder.apps.isEmpty()) homeItems.remove(folder)
-                    saveHomeState()
-                    renderAppsArea()
-                    Toast.makeText(this@MainActivity, "Вынесено на главный экран", Toast.LENGTH_SHORT).show()
-                    true
+                    saveHomeState(); renderAppsArea()
+                    Toast.makeText(this@MainActivity, "Вынесено", Toast.LENGTH_SHORT).show(); true
                 }
             }
-            cell.addView(ImageView(this).apply {
-                setImageDrawable(app.icon)
-                layoutParams = LinearLayout.LayoutParams(dp(52), dp(52))
-            })
-            cell.addView(TextView(this).apply {
-                text = app.label
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                maxLines = 1
-            })
+            cell.addView(ImageView(this).apply { setImageDrawable(app.icon); layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)) })
+            cell.addView(TextView(this).apply { text = app.label; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f); maxLines = 1 })
             grid.addView(cell)
         }
         box.addView(grid)
-
-        dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setView(box)
-            .setPositiveButton("Закрыть", null)
-            .create()
+        dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setView(box).setPositiveButton("Закрыть", null).create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.show()
-
         box.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(280).setInterpolator(OvershootInterpolator(1.4f)).start()
     }
 
     private fun showFolderMenu(folder: HomeItem.Folder, index: Int) {
-        val opts = arrayOf("✏️ Переименовать", "📂 Расформировать папку", if (isEditMode) "✅ Готово" else "🔄 Режим редактирования")
+        val opts = arrayOf("✏️ Переименовать", "📂 Расформировать", if (isEditMode) "✅ Готово" else "🔄 Редактирование")
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(folder.name)
-            .setItems(opts) { _, w ->
+            .setTitle(folder.name).setItems(opts) { _, w ->
                 when (w) {
                     0 -> {
                         val input = EditText(this).apply { setText(folder.name); setTextColor(Color.WHITE) }
                         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                            .setTitle("Переименовать")
-                            .setView(input)
-                            .setPositiveButton("ОК") { _, _ ->
-                                folder.name = input.text.toString().ifBlank { "Папка" }
-                                saveHomeState()
-                                renderAppsArea()
-                            }.show()
+                            .setTitle("Переименовать").setView(input)
+                            .setPositiveButton("ОК") { _, _ -> folder.name = input.text.toString().ifBlank { "Папка" }; saveHomeState(); renderAppsArea() }.show()
                     }
-                    1 -> {
-                        homeItems.removeAt(index)
-                        folder.apps.forEach { homeItems.add(HomeItem.App(it)) }
-                        saveHomeState()
-                        renderAppsArea()
-                    }
+                    1 -> { homeItems.removeAt(index); folder.apps.forEach { homeItems.add(HomeItem.App(it)) }; saveHomeState(); renderAppsArea() }
                     2 -> if (isEditMode) exitEditMode() else enterEditMode()
                 }
             }.show()
@@ -970,93 +717,48 @@ class MainActivity : Activity() {
 
     private fun createSearchBar(): LinearLayout {
         return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = createLiquidGlassDrawable(23f)
-            setPadding(dp(18), dp(8), dp(14), dp(8))
-            elevation = 6f
-
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = createLiquidGlassDrawable(23f); setPadding(dp(18), dp(8), dp(14), dp(8)); elevation = 6f
             addView(TextView(this@MainActivity).apply {
-                text = "🔍  Поиск"
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                setOnClickListener { showSearchDialog() }
+                text = "🔍  Поиск"; setTextColor(Color.WHITE); setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f); setOnClickListener { showSearchDialog() }
             })
-
             addView(TextView(this@MainActivity).apply {
-                text = "⚙️"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
-                setPadding(dp(10), dp(2), dp(4), dp(2))
+                text = "⚙️"; setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f); setPadding(dp(10), dp(2), dp(4), dp(2))
                 setOnClickListener { showLauncherSettingsDialog() }
             })
         }
     }
 
     private fun showSearchDialog() {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-        }
-        val input = EditText(this).apply {
-            hint = "Поиск приложений..."
-            setHintTextColor(Color.GRAY)
-            setTextColor(Color.WHITE)
-        }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)) }
+        val input = EditText(this).apply { hint = "Поиск..."; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE) }
         val lv = ListView(this)
-        box.addView(input)
-        box.addView(lv)
-
-        val dlg = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Поиск")
-            .setView(box)
-            .setNegativeButton("Закрыть", null)
-            .create()
-
+        box.addView(input); box.addView(lv)
+        val dlg = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Поиск").setView(box).setNegativeButton("Закрыть", null).create()
         fun filter(q: String) {
             val list = allApps.filter { it.label.contains(q, true) }
             lv.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, list.map { it.label })
-            lv.setOnItemClickListener { _, _, pos, _ ->
-                dlg.dismiss()
-                launchApp(list[pos].packageName)
-            }
+            lv.setOnItemClickListener { _, _, pos, _ -> dlg.dismiss(); launchApp(list[pos].packageName) }
         }
-
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { filter(s?.toString() ?: "") }
             override fun afterTextChanged(s: Editable?) {}
         })
-        filter("")
-        dlg.show()
+        filter(""); dlg.show()
     }
 
     private fun showLauncherSettingsDialog() {
-        val mode = if (isHorizontalMode) "Влево-вправо (страницы iOS)" else "Сверху-вниз (вертикально)"
-        val editStatus = if (isEditMode) "Выключить" else "Включить"
-        val opts = arrayOf(
-            "🔄 Прокрутка экрана: $mode",
-            "➕ Добавить виджет",
-            "✨ Режим редактирования (jiggle): $editStatus",
-            "♻️ Сбросить сетку по умолчанию"
-        )
+        val mode = if (isHorizontalMode) "Страницы (iOS)" else "Вертикально"
+        val opts = arrayOf("🔄 Прокрутка: $mode", "➕ Виджет", "✨ Редактирование", "♻️ Сброс")
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Настройки лаунчера")
-            .setItems(opts) { _, w ->
+            .setTitle("Настройки").setItems(opts) { _, w ->
                 when (w) {
-                    0 -> {
-                        isHorizontalMode = !isHorizontalMode
-                        prefs.edit().putBoolean("horizontal_mode", isHorizontalMode).apply()
-                        currentPage = 0
-                        renderAppsArea()
-                    }
+                    0 -> { isHorizontalMode = !isHorizontalMode; prefs.edit().putBoolean("horizontal_mode", isHorizontalMode).apply(); currentPage = 0; renderAppsArea() }
                     1 -> showAddWidgetDialog()
                     2 -> if (isEditMode) exitEditMode() else enterEditMode()
-                    3 -> {
-                        prefs.edit().remove("folders_json").remove("apps_order").apply()
-                        buildHomeItemsFromState()
-                        renderAppsArea()
-                    }
+                    3 -> { prefs.edit().remove("folders_json").remove("apps_order").apply(); buildHomeItemsFromState(); renderAppsArea() }
                 }
             }.show()
     }
@@ -1065,18 +767,10 @@ class MainActivity : Activity() {
         dockLayout.removeAllViews()
         allApps.take(4).forEach { app ->
             val iv = ImageView(this).apply {
-                setImageDrawable(app.icon)
-                layoutParams = LinearLayout.LayoutParams(0, dp(62), 1f)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-                elevation = 6f
-                setOnClickListener {
-                    if (!isEditMode) animatePress(this) { launchApp(app.packageName) }
-                }
-                setOnLongClickListener {
-                    performHaptic(35)
-                    showAppPopup(this, app, 0)
-                    true
-                }
+                setImageDrawable(app.icon); layoutParams = LinearLayout.LayoutParams(0, dp(62), 1f)
+                scaleType = ImageView.ScaleType.FIT_CENTER; elevation = 6f
+                setOnClickListener { if (!isEditMode) animatePress(this) { launchApp(app.packageName) } }
+                setOnLongClickListener { performHaptic(35); showAppPopup(this, app, 0); true }
             }
             if (isEditMode) startJiggle(iv)
             dockLayout.addView(iv)
@@ -1084,46 +778,39 @@ class MainActivity : Activity() {
     }
 
     private fun launchApp(pkg: String) {
-        try {
-            packageManager.getLaunchIntentForPackage(pkg)?.let { startActivity(it) }
-                ?: Toast.makeText(this, "Не удалось открыть", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, "Ошибка запуска", Toast.LENGTH_SHORT).show()
-        }
+        try { packageManager.getLaunchIntentForPackage(pkg)?.let { startActivity(it) } ?: Toast.makeText(this, "Не удалось", Toast.LENGTH_SHORT).show() }
+        catch (_: Exception) { Toast.makeText(this, "Ошибка", Toast.LENGTH_SHORT).show() }
     }
 
     private fun uninstallApp(pkg: String) {
-        try {
-            startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
-        } catch (e: Exception) {
-            Toast.makeText(this, "Не удалось удалить", Toast.LENGTH_SHORT).show()
-        }
+        try { startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) }
+        catch (_: Exception) { Toast.makeText(this, "Не удалось", Toast.LENGTH_SHORT).show() }
     }
 
     private fun openAppSettings(pkg: String) {
-        try {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
-        } catch (e: Exception) {}
+        try { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }) }
+        catch (_: Exception) {}
     }
 
-    private fun dp(v: Int): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
+    private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 }
-'''
+"""
 
-            with open(main_file, "w", encoding="utf-8") as f:
-                f.write(pkg_line + "\n\n" + kotlin_code.strip() + "\n")
+with open(main_file, "w", encoding="utf-8") as f:
+    f.write(pkg_line + "\n\n" + kotlin_code.strip() + "\n")
 
-            print(f"=== SUCCESSFULLY WROTE NEW MainActivity to {main_file} ===")
-            print(f"File size: {os.path.getsize(main_file)} bytes")
-            print("=" * 60)
-            PYTHON_SCRIPT
+print("=== SUCCESS: MainActivity written to", main_file, "===")
+print("File size:", os.path.getsize(main_file), "bytes")
+print("=" * 60)
+'
+
+            echo "========== PYTHON FINISHED =========="
 
       - run:
           name: Build Debug APK
           command: |
             chmod +x ./gradlew
-            ./gradlew clean assembleDebug --stacktrace --info
+            ./gradlew clean assembleDebug --stacktrace
 
       - store_artifacts:
           path: app/build/outputs/apk/debug
