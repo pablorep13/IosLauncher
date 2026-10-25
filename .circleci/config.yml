@@ -1,1 +1,31 @@
+version: 2.1
 
+orbs:
+  android: circleci/android@3.2.0
+
+jobs:
+  build-apk:
+    executor:
+      name: android/android_docker
+      tag: "2024.01.1"
+      resource_class: large
+    steps:
+      - checkout
+      - run:
+          name: Make gradlew executable
+          command: chmod +x gradlew
+      - android/accept_licenses
+      - run:
+          name: Install SDK components
+          command: sdkmanager "platforms;android-36" "build-tools;35.0.0" "build-tools;36.0.0"
+      - run:
+          name: Build debug APK
+          command: ./gradlew assembleDebug --no-daemon
+      - store_artifacts:
+          path: app/build/outputs/apk/debug
+          destination: apk
+
+workflows:
+  build:
+    jobs:
+      - build-apk
